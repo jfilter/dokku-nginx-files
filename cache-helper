@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Root side of the cache commands. Takes one directory name, so sudo needs no path pattern.
+set -euo pipefail
+readonly ROOT=/var/cache/nginx
+readonly ABSENT_EXIT=20
+
+fail() {
+  echo "$1" >&2
+  exit 2
+}
+
+[[ $# -eq 2 ]] || fail "Usage: cache-helper ensure|exists <name>"
+[[ $2 =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "Invalid cache directory name: $2"
+dir=$ROOT/$2
+[[ ! -L $dir ]] || fail "$dir is a symbolic link"
+
+case $1 in
+  ensure) install -d -g www-data -m 2770 "$dir" ;;
+  exists) [[ -d $dir ]] || exit "$ABSENT_EXIT" ;;
+  *) fail "Unknown action: $1" ;;
+esac

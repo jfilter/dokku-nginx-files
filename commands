@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -eo pipefail
+[[ $DOKKU_TRACE ]] && set -x
+source "$PLUGIN_CORE_AVAILABLE_PATH/common/functions"
+
+readonly ABSENT_EXIT=20
+readonly CACHE_ROOT=/var/cache/nginx
+readonly CACHE_HELPER=/usr/local/libexec/dokku-nginx-files-cache
+
+check_snippet_name() {
+  [[ $1 =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*\.conf$ ]] || dokku_log_fail "Invalid snippet name: $1 (expected <name>.conf)"
+}
+
+# Holds one change, its validation and its rollback together across apps: a reload reads every snippet.
+lock_snippets() {
+  exec 9>"$DOKKU_ROOT/.nginx-files.lock"
+  flock 9
+}
+
+snippet_path() {
+  echo "$DOKKU_ROOT/$1/nginx.conf.d/$2"
+}
+
+# Puts the previous snippet back when nginx rejects the new one, so a bad file never survives.
+snippet_set() {
+  local app=$1 name=$2 encoded=$3 path dir tmp previous=""
+  verify_app_name "$app"
+  check_snippet_name "$name"
+  path=$(snippet_path "$app" "$name")
+  dir=$(dirname "$path")
+  lock_snippets
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.$name.XXXXXX")
+  base64 -d <<<"$encoded" >"$tmp" || { rm -f "$tmp"; dokku_log_fail "Snippet content is not valid base64"; }
+  chmod 0644 "$tmp"
+  if [[ -e $path ]]; then
+    previous=$(mktemp "$dir/.$name.previous.XXXXXX")
+    cp -p "$path" "$previous"
+  fi
+  mv -f "$tmp" "$path"
+  if ! dokku nginx:reload; then
+    if [[ -n $previous ]]; then mv -f "$previous" "$path"; else rm -f "$path"; fi
+    dokku_log_fail "nginx rejected snippet $name of $app; the previous state is restored"
+  fi
+  [[ -z $previous ]] || rm -f "$previous"
+}
+
+snippet_get() {
+  local app=$1 name=$2 path
+  verify_app_name "$app"
+  check_snippet_name "$name"
+  path=$(snippet_path "$app" "$name")
+  [[ -e $path ]] || exit "$ABSENT_EXIT"
+  base64 -w0 "$path"
+}
+
+snippet_unset() {
+  local app=$1 name=$2 path previous
+  verify_app_name "$app"
+  check_snippet_name "$name"
+  lock_snippets
+  path=$(snippet_path "$app" "$name")
+  [[ -e $path ]] || return 0
+  previous=$(mktemp "$(dirname "$path")/.$name.previous.XXXXXX")
+  mv -f "$path" "$previous"
+  if ! dokku nginx:reload; then
+    mv -f "$previous" "$path"
+    dokku_log_fail "nginx rejected the removal of snippet $name of $app; the snippet is restored"
+  fi
+  rm -f "$previous"
+}
+
+cache_ensure() {
+  sudo -n "$CACHE_HELPER" ensure "$1"
+}
+
+cache_exists() {
+  sudo -n "$CACHE_HELPER" exists "$1"
+}
+
+require_args() {
+  [[ $1 -eq $2 ]] || dokku_log_fail "Usage: dokku $3"
+}
+
+case "$1" in
+  nginx-files:snippet-set)
+    require_args $# 4 "nginx-files:snippet-set <app> <name>.conf <base64-content>"
+    snippet_set "$2" "$3" "$4"
+    ;;
+  nginx-files:snippet-get)
+    require_args $# 3 "nginx-files:snippet-get <app> <name>.conf"
+    snippet_get "$2" "$3"
+    ;;
+  nginx-files:snippet-unset)
+    require_args $# 3 "nginx-files:snippet-unset <app> <name>.conf"
+    snippet_unset "$2" "$3"
+    ;;
+  nginx-files:cache-ensure)
+    require_args $# 2 "nginx-files:cache-ensure <name>"
+    cache_ensure "$2"
+    ;;
+  nginx-files:cache-exists)
+    require_args $# 2 "nginx-files:cache-exists <name>"
+    cache_exists "$2"
+    ;;
+  help | nginx-files:help)
+    cat <<HELP
+    nginx-files:snippet-set <app> <name>.conf <base64>, Write an nginx.conf.d snippet and reload nginx
+    nginx-files:snippet-get <app> <name>.conf, Print a snippet as base64 (exit $ABSENT_EXIT when absent)
+    nginx-files:snippet-unset <app> <name>.conf, Remove a snippet and reload nginx
+    nginx-files:cache-ensure <name>, Create $CACHE_ROOT/<name> for proxy_cache_path
+    nginx-files:cache-exists <name>, Exit $ABSENT_EXIT unless $CACHE_ROOT/<name> exists
+HELP
+    ;;
+  *)
+    exit "$DOKKU_NOT_IMPLEMENTED_EXIT"
+    ;;
+esac

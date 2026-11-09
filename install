@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Installs the root-owned cache helper and lets the dokku group run exactly that.
+set -eo pipefail
+[[ $DOKKU_TRACE ]] && set -x
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+helper=/usr/local/libexec/dokku-nginx-files-cache
+sudoers=/etc/sudoers.d/dokku-nginx-files
+
+mkdir -p "$(dirname "$helper")"
+install -m 0755 -o root -g root "$here/cache-helper" "$helper"
+
+tmp=$(mktemp)
+echo "%dokku ALL=(ALL) NOPASSWD:$helper" >"$tmp"
+visudo -cqf "$tmp"
+install -m 0440 -o root -g root "$tmp" "$sudoers"
+rm -f "$tmp"

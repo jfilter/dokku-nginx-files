@@ -1,0 +1,4 @@
+[plugin]
+description = "manages per-app nginx.conf.d snippets and nginx cache directories"
+version = "0.1.0"
+[plugin.config]
